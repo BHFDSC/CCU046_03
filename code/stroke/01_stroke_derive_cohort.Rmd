@@ -1,0 +1,999 @@
+---
+title: 'Stroke: derive cohort'
+author: "K. Fleetwood"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE, cache = FALSE}
+
+# 24 Nov: Updated to include people under 40 and over 100
+
+knitr::opts_chunk$set(echo = FALSE, fig.width = 12, height = 7)
+
+library(knitr)
+library(tidyverse)
+library(DBI)
+library(dbplyr)
+library(dplyr)
+library(janitor)
+library(arsenal)
+library(sjmisc) # functions for data transformations in the tidyverse
+
+pwd <- readLines("D:\\PhotonUser\\My Files\\Home Folder\\ccu046_db_token_for_r_kf.txt")
+
+# Functions to help with rounding
+r_folder <- "D:\\PhotonUser\\My Files\\Home Folder\\r"
+source(file.path(r_folder, "tableby_functions_19Jan24.R"))
+source(file.path(r_folder, "output_functions_11Jul24.R"))
+
+## connect to databricks
+con <- 
+  dbConnect(
+    odbc:::odbc(),
+    "databricks",
+    Password = pwd
+  )
+
+## connect to the cohort table (runs very quickly)
+cohort_tbl <- 
+  tbl(
+    con, 
+    in_schema(
+      "dsa_391419_j3w9t_collab", 
+      "ccu046_03_out_cohort_combined")
+    )
+```
+
+This document describes the derivation of the cohort for CCU046_03, analysis of stroke incidence. 
+It also examines missing data within this cohort. 
+This output was created using linked data from GDPPR, HES and death records.
+All counts are rounded to the nearest 5, and all counts under 10 are suppressed.
+
+# Derive cohort
+```{r derive_cohort}
+
+# - In GDPPR
+# - Alive at the start of follow-up (1 Nov 2019)
+# - Born before the end of follow-up (31 Dec 2023)
+gdppr_n <- 
+cohort_tbl %>%
+  filter(
+    in_gdppr == 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("2023-12-31")
+  ) %>%
+  summarise(n()) %>%
+  collect()
+gdppr_n <- as.numeric(as.data.frame(gdppr_n)[1,1])
+
+# - Exclude people whose date of death is earlier than their date of birth
+gdppr_n_dod_check <-
+  cohort_tbl %>%
+    filter(
+      in_gdppr == 1,
+      is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+      date_of_birth <= as.Date("2023-12-31"),
+      is.na(date_of_death)|(date_of_death >= date_of_birth)
+    ) %>%
+    summarise(n())
+gdppr_n_dod_check <- as.numeric(as.data.frame(gdppr_n_dod_check)[1,1])
+n_ex_dod <- gdppr_n - gdppr_n_dod_check
+
+# - Exclude people with a stroke prior to the start of the study period
+gdppr_n_wo_strk <-
+  cohort_tbl %>%
+  filter(
+    in_gdppr %in% 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("2023-12-31"),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01"))
+  ) %>%
+  summarise(n()) %>%
+  collect()
+gdppr_n_wo_strk <- as.numeric(as.data.frame(gdppr_n_wo_strk)[1,1])
+n_ex_strk <- gdppr_n - gdppr_n_wo_strk
+
+# Include people whose date of stroke is compatible with their date of death 
+# - This will be the cohort for the age-standardised analyses
+gdppr_n_dateok <-
+  cohort_tbl %>%
+  filter(
+    in_gdppr %in% 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("2023-12-31"),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date)
+  ) %>%
+  summarise(n()) %>%
+  collect()
+gdppr_n_dateok <- as.numeric(as.data.frame(gdppr_n_dateok)[1,1])
+n_ex_datebad <- gdppr_n_wo_strk - gdppr_n_dateok
+
+# For people in the cohort for the age-standardised analyses, calculate the number with a stroke
+strk_count_as <- 
+  cohort_tbl %>%
+  filter(
+    in_gdppr %in% 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("2023-12-31"),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    out_stroke_primary_flag == 1
+  ) %>%
+  summarise(n())
+
+strk_count_as <- as.numeric(as.data.frame(strk_count_as)[1,1])
+strk_per_as <- round(100*strk_count_as/gdppr_n_dateok, 1) 
+
+# Exclude people under 40 at the start of follow-up
+# Implies date of birth must be <= 31 Dec 1983
+gdppr_n_wo_strk_40 <-
+  cohort_tbl %>%
+    filter(
+      in_gdppr %in% 1,
+      is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+      date_of_birth <= as.Date("1983-12-31"),
+      is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+      is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01"))
+    ) %>%
+    summarise(n())
+gdppr_n_wo_strk_40 <- as.numeric(as.data.frame(gdppr_n_wo_strk_40)[1,1])
+n_ex_40 <- gdppr_n_wo_strk - gdppr_n_wo_strk_40
+
+# Count number of people who are 101 or older before the start of the follow-up period
+# i.e. date_of_birth > 1918-11-01
+gpppr_n_40_100 <- 
+  cohort_tbl %>%
+    filter(
+      in_gdppr %in% 1,
+      is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+      date_of_birth <= as.Date("1983-12-31"),
+      is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+      is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+      date_of_birth > as.Date("1918-11-01")
+  ) %>%
+  summarise(n())
+gpppr_n_40_100 <- as.numeric(as.data.frame(gpppr_n_40_100)[1,1])
+n_ex_100 <- gdppr_n_wo_strk_40 - gpppr_n_40_100
+
+strk_count <- 
+  cohort_tbl %>%
+  filter(
+    in_gdppr %in% 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("1983-12-31"),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    date_of_birth > as.Date("1918-11-01"),
+    out_stroke_primary_flag == 1
+  ) %>%
+  summarise(n())
+
+strk_count <- as.numeric(as.data.frame(strk_count)[1,1])
+```
+
+* `r format(rnd5(gdppr_n), digits = 10, big.mark = ",")` people in GDPPR, alive at the start of follow-up (1 Nov 2019) and born by the end of follow-up (31 Dec 2023)
+* `r format(rnd5(n_ex_strk), digits = 10, big.mark = ",")` people excluded due to stroke prior to start of follow-up
+* `r format(rnd5(gdppr_n_wo_strk), digits = 10, big.mark = ",")` people remaining in the cohort
+* `r format(rnd5(n_ex_datebad), digits = 10, big.mark = ",")` people excluded due to date of death prior to date of stroke
+* `r format(rnd5(gdppr_n_dateok), digits = 10, big.mark = ",")` included in the cohort for the age-standardised incidence analyses
+* Of the people included in the cohort for the age-standardised incidence analyses, `r format(rnd5(strk_count_as), digits = 10, big.mark = ",")` (`r strk_per_as`%) had a stroke during the follow-up period 
+* `r format(rnd5(n_ex_40), digits = 10, big.mark = ",")` people excluded because they weren't 40 years of age by the end of follow-up
+* `r format(rnd5(n_ex_100), digits = 10, big.mark = ",")` aged older than 100 at the start of the study period
+* `r format(rnd5(gpppr_n_40_100), digits = 10, big.mark = ",")` people after excluding those younger than 40 and older than 100
+
+```{r baseline_characteristics_as, results = 'hide'}
+# Baseline characteristics for people in the cohort for the age-standardised analyses
+# Extract data for people with a stroke
+cohort_strk_as <- 
+  cohort_tbl %>%
+  filter(
+    in_gdppr %in% 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("2023-12-31"),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    out_stroke_primary_flag == 1
+  ) %>%
+  select(
+    date_of_birth, sex, ethnicity_19_group, imd_quintile, date_of_death,
+    primary_exp_schizophrenia_date, primary_exp_bipolar_disorder_date, primary_exp_depression_date,
+    primary_exp_smi_label, primary_exp_smi_date, out_stroke_primary_date
+  ) %>%
+  collect()
+
+# Need to correct the SMI label to exclude events after the date of stroke
+cohort_strk_as <- 
+  cohort_strk_as %>%
+  mutate(
+    sch_date_strk = 
+      case_when(
+        is.na(primary_exp_schizophrenia_date) ~ NA,
+        primary_exp_schizophrenia_date < out_stroke_primary_date ~ primary_exp_schizophrenia_date,
+        primary_exp_schizophrenia_date >= out_stroke_primary_date ~ NA
+      ),
+    bd_date_strk = 
+      case_when(
+        is.na(primary_exp_bipolar_disorder_date) ~ NA,
+        primary_exp_bipolar_disorder_date < out_stroke_primary_date ~ primary_exp_bipolar_disorder_date,
+        primary_exp_bipolar_disorder_date >= out_stroke_primary_date ~ NA
+      ),
+    dep_date_strk = 
+      case_when(
+        is.na(primary_exp_depression_date) ~ NA,
+        primary_exp_depression_date < out_stroke_primary_date ~ primary_exp_depression_date,
+        primary_exp_depression_date >= out_stroke_primary_date ~ NA
+      ),
+    smi_strk = 
+      case_when(
+        !is.na(sch_date_strk) ~ "Schizophrenia",
+        !is.na(bd_date_strk) ~ "Bipolar disorder",
+        !is.na(dep_date_strk) ~ "Depression",
+        TRUE ~ "No SMI"
+      ),
+    smi_strk = factor(smi_strk, levels = c("Schizophrenia", "Bipolar disorder", "Depression", "No SMI")),
+    smi_strk_date = 
+      case_when(
+        smi_strk == "Schizophrenia" ~ primary_exp_schizophrenia_date,
+        smi_strk == "Bipolar disorder" ~ primary_exp_bipolar_disorder_date,
+        smi_strk == "Depression" ~ primary_exp_depression_date,
+        smi_strk == "No SMI" ~ NA,
+      )
+  )
+
+# Prepare baseline characteristics table variables
+cohort_strk_as <- 
+  cohort_strk_as %>%
+  mutate(
+    age_at_strk = as.numeric(out_stroke_primary_date - date_of_birth)/365.25,
+    sex_lab = 
+      case_when(
+        sex %in% "F" ~ "Female",
+        sex %in% "M" ~ "Male"
+      ),
+    ethnic_5 = 
+      case_when(
+        ethnicity_19_group %in% c("British", "Irish", "Traveller", "Any other White background") ~ "White",
+        ethnicity_19_group %in% c("White and Asian", "White and Black African", "White and Black Caribbean", "Any other mixed background") ~ "Mixed",
+        ethnicity_19_group %in% c("Bangladeshi", "Indian", "Pakistani") ~ "South Asian",
+        ethnicity_19_group %in% c("African", "Caribbean", "Any other Black background") ~ "Black",
+        ethnicity_19_group %in% c("Arab", "Chinese", "Any other Asian background", "Any other ethnic group") ~ "Any other ethnic group"
+      ),
+    ethnic_5 = factor(ethnic_5, levels = c("White", "Black", "South Asian", "Mixed", "Any other ethnic group")),
+    imd_quintile_lab = 
+      case_when(
+        imd_quintile %in% 1 ~ "1 (most deprived)",
+        imd_quintile %in% 5 ~ "5 (least deprived)",
+        TRUE ~ as.character(imd_quintile)
+      ),
+    imd_quintile_lab = factor(imd_quintile_lab, levels = c("1 (most deprived)", "2", "3", "4", "5 (least deprived)"))
+  )
+
+labels(cohort_strk_as)  <- 
+  c(age_at_strk = 'Age at stroke (years)',
+    sex_lab = 'Sex',
+    imd_quintile_lab = 'Area based deprivation (IMD quintile)',
+    ethnic_5 = 'Ethncity')
+
+tab_cntrls <- 
+  tableby.control(
+    test = FALSE,
+    numeric.stats = c("meansd"), 
+    cat.stats = c("countpct_5"), # , "n_per_miss_5"
+    cat.simplify = FALSE
+  )
+
+bc_tab_as <- 
+  tableby(
+    smi_strk ~ age_at_strk + sex_lab + includeNA(imd_quintile_lab, first = FALSE) + includeNA(ethnic_5, first = FALSE),
+    data = cohort_strk_as,
+    control = tab_cntrls, 
+    digits = 1, 
+    stats.labels = 
+      list(meansd = 'Mean (SD)',
+           n_per_miss_5 = 'Missing',
+           Nmiss = 'Missing')
+  )
+bc_tab_as$tables$smi_strk$y$stats <- 5*round(bc_tab_as$tables$smi_strk$y$stats/5)
+
+# Repeat for men
+bc_tab_m_as <- 
+  tableby(
+    smi_strk ~ age_at_strk + includeNA(imd_quintile_lab, first = FALSE) + includeNA(ethnic_5, first = FALSE),
+    data = filter(cohort_strk_as, sex == "M"),
+    control = tab_cntrls, 
+    digits = 1, 
+    stats.labels = 
+      list(meansd = 'Mean (SD)',
+           n_per_miss_5 = 'Missing',
+           Nmiss = 'Missing')
+  )
+bc_tab_m_as$tables$smi_strk$y$stats <- 5*round(bc_tab_m_as$tables$smi_strk$y$stats/5)
+
+# Repeat for women
+bc_tab_f_as <- 
+  tableby(
+    smi_strk ~ age_at_strk + includeNA(imd_quintile_lab, first = FALSE) + includeNA(ethnic_5, first = FALSE),
+    data = filter(cohort_strk_as, sex == "F"),
+    control = tab_cntrls, 
+    digits = 1, 
+    stats.labels = 
+      list(meansd = 'Mean (SD)',
+           #tableby_sum = 'Total', 
+           #medianrange_kf = 'Median [Min, Max]',
+           n_per_miss_5 = 'Missing',
+           Nmiss = 'Missing')
+  )
+bc_tab_f_as$tables$smi_strk$y$stats <- 5*round(bc_tab_f_as$tables$smi_strk$y$stats/5)
+```
+
+```{r baseline_characteristics, results = 'hide'}
+
+# Extract data for people with a stroke
+cohort_strk <- 
+  cohort_tbl %>%
+  filter(
+    in_gdppr == 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("1983-12-31"),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+    date_of_birth > as.Date("1918-11-01"),
+    out_stroke_primary_flag == 1
+  ) %>%
+  select(
+    date_of_birth, sex, ethnicity_19_group, imd_quintile, date_of_death,
+    primary_exp_schizophrenia_date, primary_exp_bipolar_disorder_date, primary_exp_depression_date,
+    primary_exp_smi_label, primary_exp_smi_date, out_stroke_primary_date
+  ) %>%
+  collect()
+
+# Need to correct the SMI label to exclude events on or after the date of stroke
+cohort_strk <- 
+  cohort_strk %>%
+  mutate(
+    sch_date_strk = 
+      case_when(
+        is.na(primary_exp_schizophrenia_date) ~ NA,
+        primary_exp_schizophrenia_date < out_stroke_primary_date ~ primary_exp_schizophrenia_date,
+        primary_exp_schizophrenia_date >= out_stroke_primary_date ~ NA
+      ),
+    bd_date_strk = 
+      case_when(
+        is.na(primary_exp_bipolar_disorder_date) ~ NA,
+        primary_exp_bipolar_disorder_date < out_stroke_primary_date ~ primary_exp_bipolar_disorder_date,
+        primary_exp_bipolar_disorder_date >= out_stroke_primary_date ~ NA
+      ),
+    dep_date_strk = 
+      case_when(
+        is.na(primary_exp_depression_date) ~ NA,
+        primary_exp_depression_date < out_stroke_primary_date ~ primary_exp_depression_date,
+        primary_exp_depression_date >= out_stroke_primary_date ~ NA
+      ),
+    smi_strk = 
+      case_when(
+        !is.na(sch_date_strk) ~ "Schizophrenia",
+        !is.na(bd_date_strk) ~ "Bipolar disorder",
+        !is.na(dep_date_strk) ~ "Depression",
+        TRUE ~ "No SMI"
+      ),
+    smi_strk = factor(smi_strk, levels = c("Schizophrenia", "Bipolar disorder", "Depression", "No SMI")),
+    smi_strk_date = 
+      case_when(
+        smi_strk == "Schizophrenia" ~ primary_exp_schizophrenia_date,
+        smi_strk == "Bipolar disorder" ~ primary_exp_bipolar_disorder_date,
+        smi_strk == "Depression" ~ primary_exp_depression_date,
+        smi_strk == "No SMI" ~ NA
+      )
+  )
+
+# Prepare baseline characteristics table variables
+cohort_strk <- 
+  cohort_strk %>%
+  mutate(
+    age_at_strk = as.numeric(out_stroke_primary_date - date_of_birth)/365.25,
+    sex_lab = 
+      case_when(
+        sex %in% "F" ~ "Female",
+        sex %in% "M" ~ "Male"
+      ),
+    ethnic_5 = 
+      case_when(
+        ethnicity_19_group %in% c("British", "Irish", "Traveller", "Any other White background") ~ "White",
+        ethnicity_19_group %in% c("White and Asian", "White and Black African", "White and Black Caribbean", "Any other mixed background") ~ "Mixed",
+        ethnicity_19_group %in% c("Bangladeshi", "Indian", "Pakistani") ~ "South Asian",
+        ethnicity_19_group %in% c("African", "Caribbean", "Any other Black background") ~ "Black",
+        ethnicity_19_group %in% c("Arab", "Chinese", "Any other Asian background", "Any other ethnic group") ~ "Any other ethnic group"
+      ),
+    ethnic_5 = factor(ethnic_5, levels = c("White", "Black", "South Asian", "Mixed", "Any other ethnic group")),
+    imd_quintile_lab = 
+      case_when(
+        imd_quintile %in% 1 ~ "1 (most deprived)",
+        imd_quintile %in% 5 ~ "5 (least deprived)",
+        TRUE ~ as.character(imd_quintile)
+      ),
+    imd_quintile_lab = factor(imd_quintile_lab, levels = c("1 (most deprived)", "2", "3", "4", "5 (least deprived)"))
+  )
+
+# Create baseline characteristics table
+# Only include stroke at age over 40
+cohort_strk_40 <- cohort_strk %>% filter(age_at_strk >= 40)
+ex_under_40 <- strk_count - nrow(cohort_strk_40)
+
+# Additionally exclude people with a stroke aged greater than or equal to 101
+cohort_gt_100 <- sum(cohort_strk_40$age_at_strk >= 101)
+cohort_strk_40 <- cohort_strk_40 %>% filter(age_at_strk < 101)
+
+labels(cohort_strk_40)  <- 
+  c(age_at_strk = 'Age at stroke (years)',
+    sex_lab = 'Sex',
+    imd_quintile_lab = 'Area based deprivation (IMD quintile)',
+    ethnic_5 = 'Ethncity')
+
+bc_tab <- 
+  tableby(
+    smi_strk ~ age_at_strk + sex_lab + includeNA(imd_quintile_lab, first = FALSE) + includeNA(ethnic_5, first = FALSE),
+    data = cohort_strk_40,
+    control = tab_cntrls, 
+    digits = 1, 
+    stats.labels = 
+      list(meansd = 'Mean (SD)',
+           #tableby_sum = 'Total', 
+           #medianrange_kf = 'Median [Min, Max]',
+           n_per_miss_5 = 'Missing',
+           Nmiss = 'Missing')
+  )
+bc_tab$tables$smi_strk$y$stats <- 5*round(bc_tab$tables$smi_strk$y$stats/5)
+
+# Repeat for men
+bc_tab_m <- 
+  tableby(
+    smi_strk ~ age_at_strk + includeNA(imd_quintile_lab, first = FALSE) + includeNA(ethnic_5, first = FALSE),
+    data = filter(cohort_strk_40, sex == "M"),
+    control = tab_cntrls, 
+    digits = 1, 
+    stats.labels = 
+      list(meansd = 'Mean (SD)',
+           #tableby_sum = 'Total', 
+           #medianrange_kf = 'Median [Min, Max]',
+           n_per_miss_5 = 'Missing',
+           Nmiss = 'Missing')
+  )
+bc_tab_m$tables$smi_strk$y$stats <- 5*round(bc_tab_m$tables$smi_strk$y$stats/5)
+
+# Repeat for women
+bc_tab_f <- 
+  tableby(
+    smi_strk ~ age_at_strk + includeNA(imd_quintile_lab, first = FALSE) + includeNA(ethnic_5, first = FALSE),
+    data = filter(cohort_strk_40, sex == "F"),
+    control = tab_cntrls, 
+    digits = 1, 
+    stats.labels = 
+      list(meansd = 'Mean (SD)',
+           n_per_miss_5 = 'Missing',
+           Nmiss = 'Missing')
+  )
+bc_tab_f$tables$smi_strk$y$stats <- 5*round(bc_tab_f$tables$smi_strk$y$stats/5)
+
+# Count of people excluded due to a stroke during the follow-up period, before the age of 40
+cohort_n <- gpppr_n_40_100 - ex_under_40
+strk_per <- round(100*nrow(cohort_strk_40)/cohort_n, 1) 
+```
+* Of those remaining, `r format(rnd5(ex_under_40), digits = 10, big.mark = ",")` excluded due to stroke before age 40
+* `r format(rnd5(cohort_n), digits = 10, big.mark = ",")` people included in cohort
+* `r format(rnd5(nrow(cohort_strk_40)), digits = 10, big.mark = ",")` (`r strk_per`%) had a stroke during the follow-up period, aged between 40 and 100 inclusive
+
+# Baseline characteristics of people with a stroke (cohort for age-standardised incidence rates)
+```{r by_smi_as, results='asis'}
+
+arsenal:::summary.tableby(
+  bc_tab_as, 
+  title = "Baseline characteristics of people with a stroke"
+)
+
+arsenal:::summary.tableby(
+  bc_tab_m_as, 
+  title = "Baseline characteristics of men with a stroke"
+)
+
+arsenal:::summary.tableby(
+  bc_tab_f_as, 
+  title = "Baseline characteristics of women with a stroke"
+)
+```
+
+# Baseline characteristics of people with a stroke
+```{r by_smi, results='asis'}
+
+arsenal:::summary.tableby(
+  bc_tab, 
+  title = "Baseline characteristics of people with a stroke"
+)
+
+arsenal:::summary.tableby(
+  bc_tab_m, 
+  title = "Baseline characteristics of men with a stroke"
+)
+
+arsenal:::summary.tableby(
+  bc_tab_f, 
+  title = "Baseline characteristics of women with a stroke"
+)
+```
+
+# Explore missing data
+```{r miss_explore, results = 'hide', warning = FALSE, message = FALSE}
+
+# Summarise missing ethnicity and deprivation by SMI and stroke status -------------
+
+# Select cohort (exclude people with a stroke before their 40th birthday)
+# Redefine SMI
+# Flag missing ethnicity and deprivation
+# Summarise variables
+cohort_miss_sum <-
+cohort_tbl %>%
+  mutate(
+    age_at_strk  = DATEDIFF(sql("DAY"), date_of_birth, out_stroke_primary_date),
+    age_at_strk = age_at_strk/365.25
+  ) %>%
+  filter(
+    in_gdppr == 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("1983-12-31"),
+    date_of_birth > as.Date("1918-11-01"),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+    is.na(age_at_strk)|age_at_strk >= 40
+  ) %>%
+  mutate(
+    sch_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_schizophrenia_date,
+        is.na(primary_exp_schizophrenia_date) ~ NA,
+        primary_exp_schizophrenia_date < out_stroke_primary_date ~ primary_exp_schizophrenia_date,
+        primary_exp_schizophrenia_date >= out_stroke_primary_date ~ NA
+      ),
+    bd_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_bipolar_disorder_date,
+        is.na(primary_exp_bipolar_disorder_date) ~ NA,
+        primary_exp_bipolar_disorder_date < out_stroke_primary_date ~ primary_exp_bipolar_disorder_date,
+        primary_exp_bipolar_disorder_date >= out_stroke_primary_date ~ NA
+      ),
+    dep_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_depression_date,
+        is.na(primary_exp_depression_date) ~ NA,
+        primary_exp_depression_date < out_stroke_primary_date ~ primary_exp_depression_date,
+        primary_exp_depression_date >= out_stroke_primary_date ~ NA
+      ),
+    smi_strk = 
+      case_when(
+        !is.na(sch_date_strk) ~ "Schizophrenia",
+        !is.na(bd_date_strk) ~ "Bipolar disorder",
+        !is.na(dep_date_strk) ~ "Depression",
+        TRUE ~ "No SMI"
+      ),
+    strk = 
+      case_when(
+        out_stroke_primary_flag %in% 1 ~ "Stroke",
+        is.na(out_stroke_primary_flag) ~ "No stroke"
+      ),
+    miss_ethnicity = as.numeric(is.na(ethnicity_19_group)),
+    miss_imd = as.numeric(is.na(imd_quintile)),
+    miss_eth_imd = as.numeric(is.na(ethnicity_19_group)|is.na(imd_quintile))
+  ) %>%
+  group_by(smi_strk, strk) %>%
+  summarise(n = n(), miss_eth = sum(miss_ethnicity), miss_dep = sum(miss_imd), miss_any = sum(miss_eth_imd)) %>%
+  collect()
+
+smi_lvls = c("Schizophrenia", "Bipolar disorder", "Depression", "No SMI")
+# Format table for output
+cohort_miss_sum_out <- 
+  cohort_miss_sum %>%
+  mutate(
+    smi_strk = factor(smi_strk, levels = smi_lvls),
+    # flag values less than 10 (only occurs for ethnicity)
+    miss_eth_flag10 = miss_eth < 10,
+    # round values in accordance with output rules
+    n_rnd = 5*round(n/5),
+    miss_eth_rnd = ifelse(miss_eth_flag10, 10, 5*round(miss_eth/5)),
+    miss_dep_rnd = 5*round(miss_dep/5),
+    miss_any_rnd = 5*round(miss_any/5),
+    # calculate percentages
+    miss_eth_per = format(round(100*miss_eth_rnd/n_rnd, digits = 1), digits = 1, nsmall = 1), 
+    miss_dep_per = format(round(100*miss_dep_rnd/n_rnd, digits = 1), digits = 1, nsmall = 1), 
+    miss_any_per = format(round(100*miss_any_rnd/n_rnd, digits = 1), digits = 1, nsmall = 1), 
+    # create output column
+    miss_eth_out = paste0(ifelse(miss_eth_flag10, "<10", miss_eth_rnd), " (", ifelse(miss_eth_flag10, paste0("<", miss_eth_per),miss_eth_per), "%)"),
+    miss_dep_out = paste0(miss_dep_rnd, " (", miss_dep_per, "%)"),
+    miss_any_out = paste0(miss_any_rnd, " (", miss_any_per, "%)"),
+  ) %>%
+  arrange(strk, smi_strk)
+```
+
+```{r miss_explore_eth, results = 'hide'}
+# Baseline characteristics by missingness of ethnicity
+# Present: age, sex, deprivation, smi status, stroke status
+cohort_miss_by_eth <-
+  cohort_tbl %>%
+    mutate(
+    age_at_strk  = DATEDIFF(sql("DAY"), date_of_birth, out_stroke_primary_date),
+    age_at_strk = age_at_strk/365.25
+  ) %>%
+  filter(
+    in_gdppr == 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("1983-12-31"),
+    date_of_birth > as.Date("1918-11-01"),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+    is.na(age_at_strk)|age_at_strk >= 40
+  ) %>%
+  mutate(
+    ethnic_5 = 
+      case_when(
+        ethnicity_19_group %in% c("British", "Irish", "Traveller", "Any other White background") ~ "White",
+        ethnicity_19_group %in% c("White and Asian", "White and Black African", "White and Black Caribbean", "Any other mixed background") ~ "Mixed",
+        ethnicity_19_group %in% c("Bangladeshi", "Indian", "Pakistani") ~ "South Asian",
+        ethnicity_19_group %in% c("African", "Caribbean", "Any other Black background") ~ "Black",
+        ethnicity_19_group %in% c("Arab", "Chinese", "Any other Asian background", "Any other ethnic group") ~ "Any other ethnic group"
+      ),
+    sch_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_schizophrenia_date,
+        is.na(primary_exp_schizophrenia_date) ~ NA,
+        primary_exp_schizophrenia_date < out_stroke_primary_date ~ primary_exp_schizophrenia_date,
+        primary_exp_schizophrenia_date >= out_stroke_primary_date ~ NA
+      ),
+    bd_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_bipolar_disorder_date,
+        is.na(primary_exp_bipolar_disorder_date) ~ NA,
+        primary_exp_bipolar_disorder_date < out_stroke_primary_date ~ primary_exp_bipolar_disorder_date,
+        primary_exp_bipolar_disorder_date >= out_stroke_primary_date ~ NA
+      ),
+    dep_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_depression_date,
+        is.na(primary_exp_depression_date) ~ NA,
+        primary_exp_depression_date < out_stroke_primary_date ~ primary_exp_depression_date,
+        primary_exp_depression_date >= out_stroke_primary_date ~ NA
+      ),
+    smi_strk = 
+      case_when(
+        !is.na(sch_date_strk) ~ "Schizophrenia",
+        !is.na(bd_date_strk) ~ "Bipolar disorder",
+        !is.na(dep_date_strk) ~ "Depression",
+        TRUE ~ "No SMI"
+      ),
+    strk = 
+      case_when(
+        out_stroke_primary_flag %in% 1 ~ "Stroke",
+        is.na(out_stroke_primary_flag) ~ "No stroke"
+      ),
+    miss_ethnicity = ifelse(is.na(ethnicity_19_group), "Ethnicity missing", "Ethnicity available")
+  ) %>%
+  group_by(miss_ethnicity) %>%
+  summarise(
+    n          = n(),
+    age_mean   = mean(age_at_strk),
+    age_sd     = sd(age_at_strk),
+    sex_male   = sum(as.numeric(sex %in% "M")),
+    sex_female = sum(as.numeric(sex %in% "F")),
+    imd_1      = sum(as.numeric(imd_quintile %in% 1)),
+    imd_2      = sum(as.numeric(imd_quintile %in% 2)), 
+    imd_3      = sum(as.numeric(imd_quintile %in% 3)),
+    imd_4      = sum(as.numeric(imd_quintile %in% 4)),
+    imd_5      = sum(as.numeric(imd_quintile %in% 5)),
+    imd_miss   = sum(as.numeric(is.na(imd_quintile))),
+    smi_sch    = sum(as.numeric(smi_strk %in% "Schizophrenia")),
+    smi_bd     = sum(as.numeric(smi_strk %in% "Bipolar disorder")),
+    smi_dep    = sum(as.numeric(smi_strk %in% "Depression")), 
+    smi_no     = sum(as.numeric(smi_strk %in% "No SMI")),
+    strk_yes   = sum(as.numeric(strk %in% "Stroke")),
+    strk_no    = sum(as.numeric(strk %in% "No stroke"))
+  ) %>%
+  collect()
+
+# Add %s and formatting
+cohort_miss_by_eth <- 
+  cohort_miss_by_eth %>%
+  mutate(
+    age_fmt = paste0(format(age_mean, digits = 1, nsmall = 1), " (", format(age_sd, digits = 1, nsmall = 1), ")"),
+    n_rnd = format(rnd5(n), big.mark = ","),
+    sex_male_fmt   = n_per_fmt(sex_male, n),
+    sex_female_fmt = n_per_fmt(sex_female, n), 
+    imd_1_fmt      = n_per_fmt(imd_1, n),
+    imd_2_fmt      = n_per_fmt(imd_2, n),
+    imd_3_fmt      = n_per_fmt(imd_3, n),
+    imd_4_fmt      = n_per_fmt(imd_4, n),
+    imd_5_fmt      = n_per_fmt(imd_5, n),
+    imd_miss_fmt   = n_per_fmt(imd_miss, n),
+    smi_sch_fmt    = n_per_fmt(smi_sch, n),
+    smi_bd_fmt     = n_per_fmt(smi_bd, n),
+    smi_dep_fmt    = n_per_fmt(smi_dep, n),
+    smi_no_fmt     = n_per_fmt(smi_no, n),
+    strk_yes_fmt   = n_per_fmt(strk_yes, n),
+    strk_no_fmt    = n_per_fmt(strk_no, n)
+  )
+    
+# pivot_longer
+cohort_miss_by_eth_out <- 
+  cohort_miss_by_eth %>%
+  select(miss_ethnicity, n_rnd, ends_with("fmt")) %>%
+  rotate_df(cn = TRUE) %>%
+  select('Ethnicity available', 'Ethnicity missing')
+
+rownames(cohort_miss_by_eth_out) <- 
+  c("N", "Age at stroke (years), [Mean (SD)]", "Sex, Male", "Sex, Female", 
+    "Area based deprivation (IMD quintile), 1 (most deprived)",
+    "Area based deprivation (IMD quintile), 2",
+    "Area based deprivation (IMD quintile), 3",
+    "Area based deprivation (IMD quintile), 4",
+    "Area based deprivation (IMD quintile), 5",
+    "Area based deprivation (IMD quintile), Missing",
+    "SMI, Schizophrenia",
+    "SMI, Bipolar disorder",
+    "SMI, Depression", 
+    "SMI, No SMI", 
+    "Stroke, Yes",
+    "Stroke, No")
+```
+
+```{r miss_explore_dep, results = 'hide'}
+# Baseline characteristics by missingness of deprivation
+# Present: age, sex, ethnicity, smi status, stroke status
+cohort_miss_by_dep <-
+  cohort_tbl %>%
+    mutate(
+    age_at_strk  = DATEDIFF(sql("DAY"), date_of_birth, out_stroke_primary_date),
+    age_at_strk = age_at_strk/365.25
+  ) %>%
+  filter(
+    in_gdppr == 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("1983-12-31"),
+    date_of_birth > as.Date("1918-11-01"),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+    is.na(age_at_strk)|age_at_strk >= 40
+  ) %>%
+  mutate(
+    ethnic_5 = 
+      case_when(
+        ethnicity_19_group %in% c("British", "Irish", "Traveller", "Any other White background") ~ "White",
+        ethnicity_19_group %in% c("White and Asian", "White and Black African", "White and Black Caribbean", "Any other mixed background") ~ "Mixed",
+        ethnicity_19_group %in% c("Bangladeshi", "Indian", "Pakistani") ~ "South Asian",
+        ethnicity_19_group %in% c("African", "Caribbean", "Any other Black background") ~ "Black",
+        ethnicity_19_group %in% c("Arab", "Chinese", "Any other Asian background", "Any other ethnic group") ~ "Any other ethnic group"
+      ),
+    sch_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_schizophrenia_date,
+        is.na(primary_exp_schizophrenia_date) ~ NA,
+        primary_exp_schizophrenia_date < out_stroke_primary_date ~ primary_exp_schizophrenia_date,
+        primary_exp_schizophrenia_date >= out_stroke_primary_date ~ NA
+      ),
+    bd_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_bipolar_disorder_date,
+        is.na(primary_exp_bipolar_disorder_date) ~ NA,
+        primary_exp_bipolar_disorder_date < out_stroke_primary_date ~ primary_exp_bipolar_disorder_date,
+        primary_exp_bipolar_disorder_date >= out_stroke_primary_date ~ NA
+      ),
+    dep_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_depression_date,
+        is.na(primary_exp_depression_date) ~ NA,
+        primary_exp_depression_date < out_stroke_primary_date ~ primary_exp_depression_date,
+        primary_exp_depression_date >= out_stroke_primary_date ~ NA
+      ),
+    smi_strk = 
+      case_when(
+        !is.na(sch_date_strk) ~ "Schizophrenia",
+        !is.na(bd_date_strk) ~ "Bipolar disorder",
+        !is.na(dep_date_strk) ~ "Depression",
+        TRUE ~ "No SMI"
+      ),
+    strk = 
+      case_when(
+        out_stroke_primary_flag %in% 1 ~ "Stroke",
+        is.na(out_stroke_primary_flag) ~ "No stroke"
+      ),
+    miss_imd = ifelse(is.na(imd_quintile), "IMD quintile missing", "IMD quintile available")
+  ) %>%
+  group_by(miss_imd) %>%
+  summarise(
+    n          = n(),
+    ##
+    age_mean   = mean(age_at_strk),
+    age_sd     = sd(age_at_strk),
+    ##
+    sex_male   = sum(as.numeric(sex %in% "M")),
+    sex_female = sum(as.numeric(sex %in% "F")),
+    ##
+    eth_white       = sum(as.numeric(ethnic_5 %in% "White")),
+    eth_mixed       = sum(as.numeric(ethnic_5 %in% "Mixed")),
+    eth_south_asian = sum(as.numeric(ethnic_5 %in% "South Asian")),
+    eth_black       = sum(as.numeric(ethnic_5 %in% "Black")),
+    eth_other       = sum(as.numeric(ethnic_5 %in% "Any other ethnic group")),
+    eth_miss        = sum(as.numeric(is.na(ethnic_5))),    
+    ##
+    smi_sch    = sum(as.numeric(smi_strk %in% "Schizophrenia")),
+    smi_bd     = sum(as.numeric(smi_strk %in% "Bipolar disorder")),
+    smi_dep    = sum(as.numeric(smi_strk %in% "Depression")), 
+    smi_no     = sum(as.numeric(smi_strk %in% "No SMI")),
+    ##
+    strk_yes   = sum(as.numeric(strk %in% "Stroke")),
+    strk_no    = sum(as.numeric(strk %in% "No stroke"))
+  ) %>%
+  collect()
+
+# Add %s and formatting
+cohort_miss_by_dep <- 
+  cohort_miss_by_dep %>%
+  mutate(
+    age_fmt = paste0(format(age_mean, digits = 1, nsmall = 1), " (", format(age_sd, digits = 1, nsmall = 1), ")"),
+    n_rnd = format(rnd5(n), big.mark = ","),
+    sex_male_fmt   = n_per_fmt(sex_male, n),
+    sex_female_fmt = n_per_fmt(sex_female, n), 
+    ##
+    eth_white_fmt       = n_per_fmt(eth_white, n),
+    eth_mixed_fmt       = n_per_fmt(eth_mixed, n),
+    eth_south_asian_fmt = n_per_fmt(eth_south_asian, n),
+    eth_black_fmt       = n_per_fmt(eth_black, n),
+    eth_other_fmt       = n_per_fmt(eth_other, n),
+    eth_miss_fmt        = n_per_fmt(eth_miss, n),
+    ##
+    smi_sch_fmt    = n_per_fmt(smi_sch, n),
+    smi_bd_fmt     = n_per_fmt(smi_bd, n),
+    smi_dep_fmt    = n_per_fmt(smi_dep, n),
+    smi_no_fmt     = n_per_fmt(smi_no, n),
+    strk_yes_fmt     = n_per_fmt(strk_yes, n),
+    strk_no_fmt      = n_per_fmt(strk_no, n)
+  )
+    
+# pivot_longer
+cohort_miss_by_dep_out <- 
+  cohort_miss_by_dep %>%
+  select(miss_imd, n_rnd, ends_with("fmt")) %>%
+  rotate_df(cn = TRUE) %>%
+  select('IMD quintile available', 'IMD quintile missing')
+
+rownames(cohort_miss_by_dep_out) <- 
+  c("N", "Age at stroke (years), [Mean (SD)]", "Sex, Male", "Sex, Female", 
+    "Ethnicity, White", "Ethnicity, Mixed", "Ethnicity, South Asian", 
+    "Ethnicity, Black", "Ethnicity, Any other ethnic group", "Ethnicity, missing",
+    "SMI, Schizophrenia", "SMI, Bipolar disorder", "SMI, Depression", "SMI, No SMI", 
+    "Stroke, Yes", "Stroke, No")
+```
+
+```{r miss_explore_any, results = 'hide'}
+# Baseline characteristics by missingnesss either ethnicity and deprivation
+# Present age, sex, smi status, stroke status
+cohort_miss_by_any <-
+  cohort_tbl %>%
+    mutate(
+    age_at_strk  = DATEDIFF(sql("DAY"), date_of_birth, out_stroke_primary_date),
+    age_at_strk = age_at_strk/365.25
+  ) %>%
+  filter(
+    in_gdppr == 1,
+    is.na(date_of_death)|(date_of_death > as.Date("2019-11-01")),
+    date_of_birth <= as.Date("1983-12-31"),
+    date_of_birth > as.Date("1918-11-01"),
+    is.na(out_stroke_primary_date)|(out_stroke_primary_date >= as.Date("2019-11-01")),
+    is.na(date_of_death)|is.na(out_stroke_primary_date)|(date_of_death >= out_stroke_primary_date),
+    is.na(age_at_strk)|age_at_strk >= 40
+  ) %>%
+  mutate(
+    ethnic_5 = 
+      case_when(
+        ethnicity_19_group %in% c("British", "Irish", "Traveller", "Any other White background") ~ "White",
+        ethnicity_19_group %in% c("White and Asian", "White and Black African", "White and Black Caribbean", "Any other mixed background") ~ "Mixed",
+        ethnicity_19_group %in% c("Bangladeshi", "Indian", "Pakistani") ~ "South Asian",
+        ethnicity_19_group %in% c("African", "Caribbean", "Any other Black background") ~ "Black",
+        ethnicity_19_group %in% c("Arab", "Chinese", "Any other Asian background", "Any other ethnic group") ~ "Any other ethnic group"
+      ),
+    sch_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_schizophrenia_date,
+        is.na(primary_exp_schizophrenia_date) ~ NA,
+        primary_exp_schizophrenia_date < out_stroke_primary_date ~ primary_exp_schizophrenia_date,
+        primary_exp_schizophrenia_date >= out_stroke_primary_date ~ NA
+      ),
+    bd_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_bipolar_disorder_date,
+        is.na(primary_exp_bipolar_disorder_date) ~ NA,
+        primary_exp_bipolar_disorder_date < out_stroke_primary_date ~ primary_exp_bipolar_disorder_date,
+        primary_exp_bipolar_disorder_date >= out_stroke_primary_date ~ NA
+      ),
+    dep_date_strk = 
+      case_when(
+        is.na(out_stroke_primary_date) ~ primary_exp_depression_date,
+        is.na(primary_exp_depression_date) ~ NA,
+        primary_exp_depression_date < out_stroke_primary_date ~ primary_exp_depression_date,
+        primary_exp_depression_date >= out_stroke_primary_date ~ NA
+      ),
+    smi_strk = 
+      case_when(
+        !is.na(sch_date_strk) ~ "Schizophrenia",
+        !is.na(bd_date_strk) ~ "Bipolar disorder",
+        !is.na(dep_date_strk) ~ "Depression",
+        TRUE ~ "No SMI"
+      ),
+    strk = 
+      case_when(
+        out_stroke_primary_flag %in% 1 ~ "Stroke",
+        is.na(out_stroke_primary_flag) ~ "No stroke"
+      ),
+    miss_any = ifelse(is.na(ethnicity_19_group)|is.na(imd_quintile), "Missing data", "No missing data")
+  ) %>%
+  group_by(miss_any) %>%
+  summarise(
+    n          = n(),
+    ##
+    age_mean   = mean(age_at_strk),
+    age_sd     = sd(age_at_strk),
+    ##
+    sex_male   = sum(as.numeric(sex %in% "M")),
+    sex_female = sum(as.numeric(sex %in% "F")),
+    ##
+    smi_sch    = sum(as.numeric(smi_strk %in% "Schizophrenia")),
+    smi_bd     = sum(as.numeric(smi_strk %in% "Bipolar disorder")),
+    smi_dep    = sum(as.numeric(smi_strk %in% "Depression")), 
+    smi_no     = sum(as.numeric(smi_strk %in% "No SMI")),
+    ##
+    strk_yes     = sum(as.numeric(strk %in% "Stroke")),
+    strk_no      = sum(as.numeric(strk %in% "No stroke"))
+  ) %>%
+  collect()
+
+# Add %s and formatting
+cohort_miss_by_any <- 
+  cohort_miss_by_any %>%
+  mutate(
+    age_fmt = paste0(format(age_mean, digits = 1, nsmall = 1), " (", format(age_sd, digits = 1, nsmall = 1), ")"),
+    n_rnd = format(rnd5(n), big.mark = ","),
+    sex_male_fmt   = n_per_fmt(sex_male, n),
+    sex_female_fmt = n_per_fmt(sex_female, n), 
+    ##
+    smi_sch_fmt    = n_per_fmt(smi_sch, n),
+    smi_bd_fmt     = n_per_fmt(smi_bd, n),
+    smi_dep_fmt    = n_per_fmt(smi_dep, n),
+    smi_no_fmt     = n_per_fmt(smi_no, n),
+    strk_yes_fmt   = n_per_fmt(strk_yes, n),
+    strk_no_fmt    = n_per_fmt(strk_no, n)
+  )
+    
+# pivot_longer
+cohort_miss_by_any_out <- 
+  cohort_miss_by_any %>%
+  select(miss_any, n_rnd, ends_with("fmt")) %>%
+  rotate_df(cn = TRUE) %>%
+  select('No missing data', 'Missing data')
+
+rownames(cohort_miss_by_any_out) <- 
+  c("N", "Age at stroke (years), [Mean (SD)]", "Sex, Male", "Sex, Female", 
+    "SMI, Schizophrenia", "SMI, Bipolar disorder", "SMI, Depression", "SMI, No SMI",
+    "Stroke, Yes", "Stroke, No")
+```
+
+```{r miss_out}
+
+kable(
+  select(cohort_miss_sum_out, smi_strk, strk, n_rnd, miss_eth_out, miss_dep_out, miss_any_out),
+  caption = "Missing data by SMI and stroke status",
+  col.names = c("SMI", "Stroke", "N", "Missing ethnicity, n (%)", "Missing deprivation, n (%)", "Missing any, n (%)")
+)
+
+kable(cohort_miss_by_eth_out, caption = "Comparison of people in the cohort by ethnicity missingness")
+kable(cohort_miss_by_dep_out, caption = "Comparison of people in the cohort by IMD missingness")
+kable(cohort_miss_by_any_out, caption = "Comparison of people in the cohort by overall missingness")
+```
