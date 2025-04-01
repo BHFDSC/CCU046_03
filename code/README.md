@@ -1,1 +1,1 @@
-Analysis and curation code related to the analysis conducted for this project. There is a folder for each outcome (myocardial_infarction, heart_failure and stroke) and a folder for additional helper functions (r). For each outcome the scripts should be run in numerical order. 
+Analysis and curation code related to the analysis conducted for this project. There is a folder for each outcome (myocardial_infarction, heart_failure and stroke) and a folder for additional helper functions (r). For each outcome, the scripts should be run in numerical order. 
