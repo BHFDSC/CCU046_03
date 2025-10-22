@@ -1,5 +1,7 @@
 # Severe mental illness and incidence of heart attack, heart failure and stroke
 
+**Kelly Fleetwood, John Nolan, Stewart W Mercer, Sandosh Padmanabhan, Daniel J Smith, Robert Stewart, Caroline A Jackson, on behalf of CVD-COVID-UK/COVID-IMPACT Consortium**
+
 ## Project description
 
 Severe mental illness (SMI), which includes schizophrenia, bipolar disorder and major depression, affects roughly one in ten adults every year in the United Kingdom. People with SMI die 10-20 years earlier than people without SMI. This is mainly due to poorer physical health, in particular a higher risk of cardiovascular disease (CVD). The COVID-19 pandemic is thought to have worsened various pre-existing health inequalities, but the extent to which mental health inequalities have been exacerbated remains unclear.
@@ -9,7 +11,7 @@ Previous research, including analyses of the CVD-COVID-UK resource have shown th
 This study will use English data from the CVD-COVID-UK resource to determine the impact of the COVID-19 pandemic on associations between mental illness and incidence of myocardial infarction, heart failure and stroke. This understanding will inform strategies to address these mental health inequalities and to mitigate the impact of future disruptions to health care provision.
 
 ## How to cite this work
-> Citation details to follow
+Fleetwood K, Nolan J, Mercer SW, Padmanabhan S, Smith DJ, Stewart R, et al. Impact of the COVID-19 pandemic on incidence of myocardial infarction, heart failure and stroke, by mental disorder diagnosis, in England, 2019–2023: a cohort study. Open Heart. 2025;12:e003398. https://doi.org/10.1136/openhrt-2025-003398
 
 ## Contents
 
